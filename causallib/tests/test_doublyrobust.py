@@ -31,8 +31,17 @@ from causallib.estimation import AIPW, PropensityFeatureStandardization, Weighte
 from causallib.estimation import IPW
 from causallib.estimation import Standardization, StratifiedStandardization
 
+from causallib.utils.exceptions import ColumnNameChangeWarning
+
 
 class TestDoublyRobustBase(unittest.TestCase):
+    def setUp(self):
+        warnings.simplefilter("ignore", category=ColumnNameChangeWarning)
+        # warnings.filterwarnings("ignore", message="`a.name` is None. Renaming to 'a'.")
+        # warnings.filterwarnings("ignore", message="Converting `X.columns` to strings to match `a.name` type.")
+        # # warnings.filterwarnings("ignore", message="Column names of `X` contain mixed types ({'str', 'int'}), which sklearn>1.2 will raise for. Therefore `X.columns` were all converted to string.")
+        # warnings.filterwarnings("ignore", message="Column names of `X` contain mixed types")
+
     @staticmethod
     def create_uninformative_tx_dataset():
         n = 100
@@ -117,6 +126,21 @@ class TestDoublyRobustBase(unittest.TestCase):
         self.assertEqual(estimator.outcome_model.learner.coef_.size,
                          len(estimator.outcome_covariates) + n_added_outcome_model_features)
         self.assertEqual(estimator.weight_model.learner.coef_.size, len(estimator.weight_covariates))
+
+    def ensure_fit_with_no_outcome_covariates(self, estimator, n_added_outcome_model_features):
+        data = self.create_uninformative_ox_dataset()
+        # Reinitialize estimator:
+        estimator = estimator.__class__(estimator.outcome_model, estimator.weight_model,
+                                        outcome_covariates=[], weight_covariates=None)
+        estimator.fit(data["X"], data["a"], data["y"])
+        self.assertEqual(
+            estimator.outcome_model.learner.coef_.size,
+            n_added_outcome_model_features
+        )
+        self.assertEqual(
+            estimator.weight_model.learner.coef_.size,
+            data["X"].shape[1]
+        )
 
     def ensure_weight_refitting_refits(self, estimator):
         data = self.create_uninformative_ox_dataset()
@@ -216,7 +240,7 @@ class TestAIPW(TestDoublyRobustBase):
         TestDoublyRobustBase.setUpClass()
         # Avoids regularization of the model:
         ipw = IPW(LogisticRegression(C=1e6, solver='lbfgs', max_iter=500), use_stabilized=False)
-        std = Standardization(LinearRegression(normalize=True))
+        std = Standardization(LinearRegression())
         cls.estimator = AIPW(std, ipw)
 
     def test_uninformative_tx_leads_to_std_like_results(self):
@@ -242,6 +266,9 @@ class TestAIPW(TestDoublyRobustBase):
 
     def test_data_is_separated_between_models(self):
         self.ensure_data_is_separated_between_models(self.estimator, 1)  # 1 treatment assignment feature
+
+    def test_fit_with_no_outcome_covariates(self):
+        self.ensure_fit_with_no_outcome_covariates(self.estimator, 1)
 
     def test_weight_refitting_refits(self):
         self.ensure_weight_refitting_refits(self.estimator)
@@ -328,7 +355,7 @@ class TestWeightedStandardization(TestDoublyRobustBase):
         TestDoublyRobustBase.setUpClass()
         # Avoids regularization of the model:
         ipw = IPW(LogisticRegression(C=1e6, solver='lbfgs'), use_stabilized=False)
-        std = Standardization(LinearRegression(normalize=True))
+        std = Standardization(LinearRegression())
         cls.estimator = WeightedStandardization(std, ipw)
 
     def test_uninformative_tx_leads_to_std_like_results(self):
@@ -342,6 +369,10 @@ class TestWeightedStandardization(TestDoublyRobustBase):
 
     def test_data_is_separated_between_models(self):
         self.ensure_data_is_separated_between_models(self.estimator, 1)  # 1 treatment assignment feature
+
+    def test_fit_with_no_outcome_covariates(self):
+        # Basically an Marginal Structural Model (MSM)
+        self.ensure_fit_with_no_outcome_covariates(self.estimator, 1)
 
     def test_weight_refitting_refits(self):
         self.ensure_weight_refitting_refits(self.estimator)
@@ -398,6 +429,28 @@ class TestWeightedStandardization(TestDoublyRobustBase):
                         # not all ML models support that and so calling should fail
                         model.fit(data["X"], data["a"], data["y"], refit_weight_model=False)
 
+    def test_with_matching(self):
+        from causallib.estimation import Matching
+
+        data = self.create_uninformative_tx_dataset()
+        matching = Matching(
+            matching_mode="control_to_treatment",
+            with_replacement=False,
+        )
+        model = WeightedStandardization(
+            outcome_model=self.estimator.outcome_model,
+            weight_model=matching,
+        )
+        model.fit(data["X"], data["a"], data["y"])
+        weights = model.weight_model.compute_weights(data["X"], data["a"])
+        np.testing.assert_array_equal(weights.values, 1)
+
+        po_wstd = model.estimate_population_outcome(data["X"], data["a"])
+
+        self.estimator.outcome_model.fit(data["X"], data["a"], data["y"])
+        po_std = self.estimator.outcome_model.estimate_population_outcome(data["X"], data["a"])
+        pd.testing.assert_series_equal(po_wstd, po_std)
+
     def test_effect_recovery(self):
         self.ensure_effect_recovery()
 
@@ -408,14 +461,14 @@ class TestPropensityFeatureStandardization(TestDoublyRobustBase):
         TestDoublyRobustBase.setUpClass()
         # Avoids regularization of the model:
         ipw = IPW(LogisticRegression(C=1e6, solver='lbfgs'), use_stabilized=False)
-        std = Standardization(LinearRegression(normalize=True))
+        std = Standardization(LinearRegression())
         cls.estimator = PropensityFeatureStandardization(std, ipw)
 
     def fit_and_predict_all_learners(self, data, estimator):
         X, a, y = data["X"], data["a"], data["y"]
         self.estimator.fit(X, a, y)
         doubly_res = self.estimator.estimate_population_outcome(X, a)
-        std_res = Standardization(LinearRegression(normalize=True)).fit(X, a, y).estimate_population_outcome(X, a)
+        std_res = Standardization(LinearRegression()).fit(X, a, y).estimate_population_outcome(X, a)
         ipw_res = self.estimator.weight_model.estimate_population_outcome(X, a, y)
         return doubly_res, std_res, ipw_res
 
@@ -430,6 +483,9 @@ class TestPropensityFeatureStandardization(TestDoublyRobustBase):
 
     def test_data_is_separated_between_models(self):
         self.ensure_data_is_separated_between_models(self.estimator, 1 + 1)  # 1 ip-feature + 1 treatment assignment
+
+    def test_fit_with_no_outcome_covariates(self):
+        self.ensure_fit_with_no_outcome_covariates(self.estimator, 1 + 1)
 
     def test_weight_refitting_refits(self):
         self.ensure_weight_refitting_refits(self.estimator)
@@ -469,6 +525,11 @@ class TestPropensityFeatureStandardization(TestDoublyRobustBase):
                 added_covariates = 1 if "vector" in feature_type else 2  # Else it's a matrix
                 n_coefs = self.estimator.outcome_model.learner.coef_.size
                 self.assertEqual(n_coefs, X_size + added_covariates + 1)  # 1 for treatment assignment
+
+        with self.subTest("Test non-existing feature type"):
+            with self.assertRaises(ValueError):
+                self.estimator._get_feature_function("nonexistent_feature")
+
 
         # with self.subTest("Test signed_weight_vector takes only binary", skip=True):
         #     a = data['a'].copy()

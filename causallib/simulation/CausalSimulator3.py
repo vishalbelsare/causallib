@@ -186,7 +186,7 @@ class CausalSimulator3(object):
 
         # Create a graph out of matrix topology:
         self.topology = topology
-        self.graph_topology = nx.from_numpy_matrix(topology.transpose(), create_using=nx.DiGraph())  # type:nx.DiGraph
+        self.graph_topology = nx.from_numpy_array(topology.transpose(), create_using=nx.DiGraph())  # type:nx.DiGraph
         self.graph_topology = nx.relabel_nodes(self.graph_topology,
                                                dict(list(zip(list(range(self.m)), self.var_names))))
 
@@ -216,7 +216,7 @@ class CausalSimulator3(object):
 
         # check that effect modifier is independent on treatment and affects only the outcome:
         for i in self.effmod_indices:
-            successors = self.graph_topology.successors(i)
+            successors = list(self.graph_topology.successors(i))
             if len(successors) == 0 or self.outcome_indices.intersection(successors).size < 1:
                 raise ValueError("Effect modifier variable {name} must affect an outcome variable".format(name=i))
             ancestors = nx.ancestors(self.graph_topology, i)
@@ -441,7 +441,7 @@ class CausalSimulator3(object):
 
         # generate latent continuous covariates - every variable is guaranteed to have a population variance of 1.0
         # X_latent = pd.DataFrame(index=patients_index, columns=self.var_types.index)
-        X = pd.DataFrame(index=patients_index, columns=self.var_types.index)
+        X = pd.DataFrame(index=patients_index, columns=self.var_types.index, dtype=float)
         if X_given is not None:  # if a dataset is given, integrate it to the current dataset being build.
             X.loc[:, X_given.columns] = X_given
             for col in X_given.columns:
@@ -751,13 +751,17 @@ class CausalSimulator3(object):
         elif outcome_type == SURVIVAL:
             if survival_distribution == "expon":
                 rnd_state = np.random.randint(low=0, high=999999)
-                param = survival_baseline * np.exp(x_outcome)
+                param = survival_baseline * np.exp(x_outcome.astype(float))
                 x_outcome = pd.Series(
                     stats.expon(loc=0.0, scale=(1.0 / param)).rvs(x_outcome.size, random_state=rnd_state),
                     index=x_outcome.index)
                 cf = {i: pd.Series(
-                    stats.expon(loc=0.0, scale=(1 / (survival_baseline * np.exp(cf[i])))).rvs(x_outcome.size,
-                                                                                              random_state=rnd_state),
+                    stats.expon(
+                        loc=0.0,
+                        scale=(1 / (survival_baseline * np.exp(cf[i].astype(float))))).rvs(
+                            x_outcome.size,
+                            random_state=rnd_state
+                    ),
                     index=x_outcome.index)
                 if has_treatment_parent else cf[i] for i in list(cf.keys())}
                 # Supplying the random state assures that the resulting outcome and cfs is consistent while sampling rvs
@@ -826,7 +830,7 @@ class CausalSimulator3(object):
                                                          var_name=var_name)
             if survival_distribution == "expon":
                 # param = survival_baseline * (prob_category.iloc[0]/prob_category.loc[1]) * np.exp(x_signal)  # Cox ph
-                param = survival_baseline * np.exp(x_signal)  # Cox ph model
+                param = survival_baseline * np.exp(x_signal.astype(float))  # Cox ph model
                 survival_distribution = stats.expon(loc=0.0, scale=(1.0 / param))
                 x_censor = pd.Series(survival_distribution.rvs(size=x_signal.size), index=x_signal.index)
                 # scale values with censoring proportions - 0 is non censored, 1 is censored:
@@ -941,7 +945,7 @@ class CausalSimulator3(object):
         # compute propensities:
         t = x_continuous.quantile(prob_category.iloc[1], interpolation="higher")
         slope = params.get("slope", 1.0) if params is not None else 1.0
-        cur_propensity = 1.0 / (1 + np.exp(slope * (x_continuous - np.repeat(t, x_continuous.size))))
+        cur_propensity = 1.0 / (1 + np.exp(slope * (x_continuous - np.repeat(t, x_continuous.size)).astype(float)))
         # assign the propensity values:
         propensity.loc[:, columns_names[1]] = cur_propensity
         propensity.loc[:, columns_names[0]] = np.ones(cur_propensity.size) - cur_propensity
@@ -968,11 +972,12 @@ class CausalSimulator3(object):
             - **propensity** (*pd.DataFrame*): The marginal conditional probability of treatment given covariates.
                                                A DataFrame shaped (num_samples x num_of_possible_treatment_categories).
         """
+        x_continuous = x_continuous.astype(float)
         index_names = x_continuous.index
         columns_names = prob_category.index
         propensity = pd.DataFrame(index=index_names, columns=columns_names)
         # start with filling up the odds ratio:
-        for cur_category, p in prob_category.iteritems():
+        for cur_category, p in prob_category.items():
             t = x_continuous.quantile(p, interpolation="higher")
             cur_propensity = (1.0 / (1 + np.exp((x_continuous - np.repeat(t, x_continuous.size)))))  # type: pd.Series
             cur_propensity = cur_propensity.div(np.ones_like(cur_propensity) - cur_propensity)
@@ -1012,8 +1017,12 @@ class CausalSimulator3(object):
         columns_names = prob_category.index
         propensity = pd.DataFrame(index=index_names, columns=columns_names)
         # section the signal into bins based on the probabilities (quantiles)
-        bins = pd.qcut(x=x_continuous, q=np.cumsum(pd.Series(0, index=["null"]).append(prob_category)),
-                       labels=columns_names)
+        x_continuous = x_continuous.astype(float)
+        bins = pd.qcut(
+            x=x_continuous,
+            q=np.cumsum(pd.concat([pd.Series(0, index=["null"]), prob_category])),
+            labels=columns_names
+        )
         for cur_category in columns_names:
             cur_samples_mask = (bins == cur_category)
             cur_samples = x_continuous[cur_samples_mask]
@@ -1103,8 +1112,10 @@ class CausalSimulator3(object):
                     res = cutoffs.sum(axis="columns")
                 elif method == "empiric":  # discretize according to percentiles from the empirical data itself
                     try:
-                        cumulative_ps = pd.Series(0, index=["null"]).append(prob_category).cumsum()
-                        res, bins = pd.qcut(x=x_col, q=cumulative_ps,
+                        cumulative_ps = pd.concat(
+                            [pd.Series(0, index=["null"]), prob_category]
+                        ).cumsum()
+                        res, bins = pd.qcut(x=x_col.astype(float), q=cumulative_ps,
                                             labels=prob_category.index, retbins=True)
                         bins = pd.Series(data=bins, index=cumulative_ps.index)
                         # TODO: maybe noise this a little?
@@ -1331,7 +1342,7 @@ class CausalSimulator3(object):
             beta = pd.DataFrame(data=np.random.normal(loc=0.0, scale=4.0, size=(degree, X_parents.columns.size)),
                                 columns=X_parents.columns, index=np.arange(degree))
 
-        result_polynomial = pd.DataFrame(data=None, index=X_parents.index, columns=X_parents.columns)
+        result_polynomial = pd.DataFrame(data=None, index=X_parents.index, columns=X_parents.columns, dtype=float)
         degrees = beta.index.to_series()
         # Apply a polynomial to every parent variable
         for var_name, col in X_parents.items():
@@ -1541,7 +1552,10 @@ def generate_random_topology(n_covariates, p, n_treatments=1, n_outcomes=1, n_ce
     generated_vars = covariates + treatments + outcomes + censoring
     generated_vars = pd.Series(data=generated_vars, index=generated_vars)
 
-    total_vars = given_vars.append(generated_vars)
+    total_vars = pd.concat([
+        given_vars if not given_vars.empty else None,
+        generated_vars if not generated_vars.empty else None,
+    ])
     topology = pd.DataFrame(data=0, index=total_vars, columns=total_vars, dtype=bool)
 
     # generate between the independent given set to generated set:
@@ -1577,10 +1591,18 @@ def generate_random_topology(n_covariates, p, n_treatments=1, n_outcomes=1, n_ce
     generated_types[treatments] = TREATMENT
     generated_types[outcomes] = OUTCOME
     generated_types[censoring] = CENSOR
-    var_types = pd.Series(data=COVARIATE, index=given_vars).append(generated_types)
+    given_types = pd.Series(data=COVARIATE, index=given_vars)
+    # Nullify empty Frames/Series before concat to satisfy pandas FutureWarning:
+    given_types = None if given_types.empty else given_types
+    generated_types = None if generated_types.empty else generated_types
+    var_types = pd.concat([given_types, generated_types])
 
     # create a hidden variables mask:
-    hidden_vars = given_vars.append(pd.Series(covariates)).sample(frac=p_hidden)
+    covariates = pd.Series(covariates)
+    # Nullify empty Frames/Series before concat to satisfy pandas FutureWarning:
+    given_vars = None if given_vars.empty else given_vars
+    covariates = None if covariates.empty else covariates
+    hidden_vars = pd.concat([given_vars, covariates]).sample(frac=p_hidden)
     var_types[hidden_vars] = HIDDEN
 
     return topology, var_types

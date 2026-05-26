@@ -13,8 +13,8 @@ from .metrics import evaluate_metrics
 from ..metrics.weight_metrics import calculate_covariate_balance
 
 
-WeightEvaluatorScores = namedtuple(
-    "WeightEvaluatorScores", ["prediction_scores", "covariate_balance"]
+PropensityEvaluatorScores = namedtuple(
+    "PropensityEvaluatorScores", ["prediction_scores", "covariate_balance"]
 )
 
 
@@ -25,11 +25,47 @@ class WeightPredictions:
         self,
         weight_by_treatment_assignment,
         weight_for_being_treated,
-        treatment_assignment_pred,
     ):
         self.weight_by_treatment_assignment = weight_by_treatment_assignment
         self.weight_for_being_treated = weight_for_being_treated
+
+    def evaluate_metrics(self, X, a_true, metrics_to_evaluate):
+        """
+        Evaluate covariate balancing of the weight model
+
+        Args:
+            X (pd.DataFrame): Covariates.
+            a_true (pd.Series): ground truth treatment assignment
+            metrics_to_evaluate (dict | None): IGNORED.
+
+        Returns:
+            pd.DataFrame: a `covariate_balance` dataframe
+        """
+        covariate_balance = calculate_covariate_balance(
+            X, a_true, self.weight_by_treatment_assignment
+        )
+        # results = PropensityEvaluatorScores(None, covariate_balance)
+        return covariate_balance
+
+
+class PropensityPredictions(WeightPredictions):
+    """Data structure to hold propensity-model predictions"""
+
+    def __init__(
+        self,
+        weight_by_treatment_assignment,
+        weight_for_being_treated,
+        treatment_assignment_pred,
+        propensity,
+        propensity_by_treatment_assignment,
+    ):
+        super().__init__(
+            weight_by_treatment_assignment,
+            weight_for_being_treated,
+        )
         self.treatment_assignment_pred = treatment_assignment_pred
+        self.propensity = propensity
+        self.propensity_by_treatment_assignment = propensity_by_treatment_assignment
 
     def evaluate_metrics(self, X, a_true, metrics_to_evaluate):
         """
@@ -54,47 +90,23 @@ class WeightPredictions:
         )
         # Convert single-dtype Series to a row in a DataFrame:
         evaluated_metrics_df = pd.DataFrame(evaluated_metrics).T
-        # change dtype of each column to numerical if possible:
-        evaluated_metrics_df = evaluated_metrics_df.apply(
-            pd.to_numeric, errors="ignore"
-        )
+        # Try to change dtype of each column to numerical if possible and fill back in those that could not:
+        evaluated_metrics_df_numercized = evaluated_metrics_df.apply(pd.to_numeric, errors="coerce")
+        evaluated_metrics_df_numercized = evaluated_metrics_df_numercized.fillna(evaluated_metrics_df)
 
         covariate_balance = calculate_covariate_balance(
             X, a_true, self.weight_by_treatment_assignment
         )
 
-        results = WeightEvaluatorScores(evaluated_metrics_df, covariate_balance)
+        results = PropensityEvaluatorScores(evaluated_metrics_df_numercized, covariate_balance)
+        # TODO: rename to PropensityEvaluatorScorers ?
         return results
-
-    def _get_predictions_to_evaluate(self):
-        y_pred_proba = self.weight_for_being_treated
-        y_pred = self.treatment_assignment_pred
-        return y_pred_proba, y_pred
-
-
-class PropensityPredictions(WeightPredictions):
-    """Data structure to hold propensity-model predictions"""
-
-    def __init__(
-        self,
-        weight_by_treatment_assignment,
-        weight_for_being_treated,
-        treatment_assignment_pred,
-        propensity,
-        propensity_by_treatment_assignment,
-    ):
-        super().__init__(
-            weight_by_treatment_assignment,
-            weight_for_being_treated,
-            treatment_assignment_pred,
-        )
-        self.propensity = propensity
-        self.propensity_by_treatment_assignment = propensity_by_treatment_assignment
 
     def _get_predictions_to_evaluate(self):
         y_pred_proba = self.propensity
         y_pred = self.treatment_assignment_pred
         return y_pred_proba, y_pred
+
 
 class OutcomePredictions:
     """Data structure to hold outcome-model predictions"""
@@ -158,8 +170,10 @@ class OutcomePredictions:
         )
 
         scores = pd.concat(scores, names=["model_strata"], axis="columns").T
-        scores = scores.apply(pd.to_numeric, errors="ignore")
-        return scores
+        # Try to make whatever columns possible numeric, and fill back in those that could not:
+        scores_numercized = scores.apply(pd.to_numeric, errors="coerce")
+        scores_numercized = scores_numercized.fillna(scores)
+        return scores_numercized
 
     def _evaluate_metrics_on_treatment_value(
         self, a_true, y_true, metrics_to_evaluate, treatment_value
